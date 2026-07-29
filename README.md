@@ -1,5 +1,7 @@
 # Podkop Auto-Sub (podkop-autosub)
 
+**English** | [Русский](README_RU.md)
+
 Automated key rotation and health monitoring tool for Podkop proxy on OpenWrt.
 
 ## Features
