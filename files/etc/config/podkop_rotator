@@ -1,0 +1,8 @@
+config podkop_rotator 'main'
+	option enabled '1'
+	option sub_url 'https://raw.githack.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt'
+	option max_ping '500'
+	option check_interval '180'
+	option tg_notifications '0'
+	option tg_token ''
+	option tg_chat_id ''
