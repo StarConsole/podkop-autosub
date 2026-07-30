@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 REPO_URL="https://raw.githubusercontent.com/StarConsole/podkop-autosub/main/files"
 
 echo "=== Installing Podkop Auto-Sub Core (v${VERSION}) ==="
