@@ -1,8 +1,9 @@
 #!/bin/sh
 
+VERSION="0.2.0"
 REPO_URL="https://raw.githubusercontent.com/StarConsole/podkop-autosub/main/files"
 
-echo "=== Installing Podkop Auto-Sub Core ==="
+echo "=== Installing Podkop Auto-Sub Core (v${VERSION}) ==="
 
 # 1. Скачиваем конфиг (если его еще нет)
 if [ ! -f /etc/config/podkop_rotator ]; then
@@ -37,5 +38,5 @@ echo "Enabling and starting service..."
 /etc/init.d/podkop_rotator enable
 /etc/init.d/podkop_rotator restart
 
-echo "=== Installation Complete! ==="
-echo "Use 'podkop-autosub help' to see available CLI commands."
+echo "=== Installation Complete! Version v${VERSION} ==="
+echo "Use 'podkop-autosub help' or 'podkop-autosub version' for CLI management."
