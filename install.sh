@@ -1,16 +1,19 @@
 #!/bin/sh
 
-# Определяем абсолютную директорию, где находится сам install.sh
+# Определяем абсолютную директорию
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "=== Установка podkop-autosub v0.3.1 ==="
+# Подсасываем версию из основного файла
+VERSION=$(grep '^VERSION=' "$SCRIPT_DIR/files/usr/bin/podkop-rotator.sh" | cut -d'"' -f2)
 
-# 1. Создаем дефолтный конфиг, если его нет
+echo "=== Установка podkop-autosub v${VERSION} ==="
+
+# 1. Создаем дефолтный конфиг
 if [ ! -f /etc/config/podkop_rotator ]; then
     echo "[+] Копируем конфиг по умолчанию в /etc/config/podkop_rotator"
     cp "$SCRIPT_DIR/files/etc/config/podkop_rotator" /etc/config/podkop_rotator
 else
-    echo "[*] Конфиг /etc/config/podkop_rotator уже существует, сохраняем пользовательские настройки"
+    echo "[*] Конфиг /etc/config/podkop_rotator уже существует"
 fi
 
 # 2. Копируем исполняемые файлы и выставляем права
@@ -21,8 +24,8 @@ chmod +x /usr/bin/podkop-rotator.sh
 cp "$SCRIPT_DIR/files/etc/init.d/podkop_rotator" /etc/init.d/podkop_rotator
 chmod +x /etc/init.d/podkop_rotator
 
-# 3. Включение службы в автозагрузку
+# 3. Включение службы
 /etc/init.d/podkop_rotator enable
 
 echo "=== Установка завершена! ==="
-echo "Для ручной проверки запусти: /usr/bin/podkop-rotator.sh"
+echo "Для проверки статуса запусти: podkop-rotator.sh status"
