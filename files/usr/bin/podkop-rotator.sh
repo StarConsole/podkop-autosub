@@ -46,7 +46,13 @@ check_connection() {
         fi
     fi
 
+    # Проверка YouTube с 2 попытками для прогрева туннеля
     YT_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "https://www.youtube.com/generate_204")
+    if [ "$YT_CODE" != "204" ]; then
+        sleep 2
+        YT_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "https://www.youtube.com/generate_204")
+    fi
+
     if [ "$YT_CODE" != "204" ]; then
         LAST_REASON="YouTube check failed (HTTP: ${YT_CODE:-000})"
         return 1
@@ -125,7 +131,7 @@ rotate_keys() {
 
         uci set podkop.main.proxy_string="$KEY"
         /etc/init.d/podkop restart >/dev/null 2>&1
-        sleep 4
+        sleep 8
 
         if ! sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
             log "  └─ [FAIL] Sing-box rejected key syntax"
