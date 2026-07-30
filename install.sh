@@ -3,7 +3,7 @@
 # Определяем абсолютную директорию, где находится сам install.sh
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "=== Установка podkop-autosub v0.3.0 ==="
+echo "=== Установка podkop-autosub v0.3.1 ==="
 
 # 1. Создаем дефолтный конфиг, если его нет
 if [ ! -f /etc/config/podkop_rotator ]; then
