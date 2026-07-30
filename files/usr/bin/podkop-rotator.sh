@@ -1,10 +1,11 @@
 #!/bin/sh
 
-VERSION="0.2.0"
+VERSION="0.2.1-debug"
 LOG_FILE="/tmp/podkop_rotator.log"
 CACHE_FILE="/etc/podkop_sub_cache.txt"
 TMP_LIST="/tmp/vpn_subscription.txt"
 FILTERED_LIST="/tmp/vpn_filtered.txt"
+CURL_ERR_LOG="/tmp/podkop_curl_err.log"
 LAST_REASON="Unknown"
 LAST_PING="N/A"
 
@@ -25,46 +26,69 @@ send_tg() {
     fi
 }
 
-get_proxy_args() {
-    # Динамически ищем локальный SOCKS/Mixed порт Sing-box в конфиге Подкопа
-    local port=$(grep -oE '"listen_port":\s*[0-9]+' /etc/sing-box/config.json 2>/dev/null | head -n 1 | awk -F':' '{print $2}' | tr -d ' ')
-    if [ -z "$port" ]; then
-        port=$(grep -oE '"port":\s*[0-9]+' /etc/sing-box/config.json 2>/dev/null | head -n 1 | awk -F':' '{print $2}' | tr -d ' ')
-    fi
-
-    # Фолбэк на дефолтный порт Подкопа 2080
-    port="${port:-2080}"
-
-    echo "-x socks5h://127.0.0.1:${port}"
+get_ping() {
+    local ip="$1"
+    local res=$(ping -c 2 -W 2 "$ip" 2>/dev/null | grep -oE "time=[0-9.]+" | head -n 1 | cut -d'=' -f2 | cut -d'.' -f1)
+    echo "$res"
 }
 
 check_connection() {
     local max_ping=$(uci -q get podkop_rotator.main.max_ping || echo 500)
-    local proxy_arg=$(get_proxy_args)
 
-    # 1. Запрос к YouTube через локальный прокси Sing-box с замером времени (реального пинга)
-    local res=$(curl -s -4 $proxy_arg -o /dev/null -w "%{http_code}:%{time_total}" --max-time 6 "https://www.youtube.com/generate_204" 2>/dev/null)
+    # 1. Детектим SOCKS-порт Sing-box
+    local proxy_port=$(grep -oE '"(listen_)?port":\s*[0-9]+' /etc/sing-box/config.json 2>/dev/null | head -n 1 | awk -F':' '{print $2}' | tr -d ' ')
+    proxy_port="${proxy_port:-2080}"
+    log "  ├─ [DEBUG] Detected SOCKS5 port: ${proxy_port}"
+
+    # 2. Проверяем статус sing-box
+    local sb_pid=$(pgrep sing-box | head -n 1)
+    if [ -z "$sb_pid" ]; then
+        log "  ├─ [DEBUG-ERROR] sing-box process is NOT running!"
+        LAST_REASON="sing-box daemon is dead"
+        return 1
+    else
+        log "  ├─ [DEBUG] sing-box process alive (PID: ${sb_pid})"
+    fi
+
+    # 3. Делаем запрос к YouTube через SOCKS5 и фиксируем stderr от curl
+    rm -f "$CURL_ERR_LOG"
+    local res=$(curl -s -4 -x "socks5h://127.0.0.1:${proxy_port}" -o /dev/null -w "%{http_code}:%{time_total}" --max-time 6 "https://www.youtube.com/generate_204" 2>"$CURL_ERR_LOG")
     local yt_code=$(echo "$res" | cut -d':' -f1)
     local time_sec=$(echo "$res" | cut -d':' -f2)
+    local curl_err=$(cat "$CURL_ERR_LOG" | tr '\n' ' ' | sed 's/  */ /g')
+
+    log "  ├─ [DEBUG] YouTube response: HTTP=${yt_code:-000} | Time=${time_sec:-0.00}s"
+    if [ -n "$curl_err" ]; then
+        log "  ├─ [DEBUG-CURL-ERR] $curl_err"
+    fi
 
     if [ "$yt_code" != "204" ] || [ -z "$time_sec" ]; then
-        LAST_REASON="YouTube check failed via tunnel (HTTP: ${yt_code:-000})"
+        LAST_REASON="YouTube check failed (HTTP: ${yt_code:-000}, err: ${curl_err:-none})"
         LAST_PING="TIMEOUT"
         return 1
     fi
 
-    # Считаем реальный пинг туннеля в миллисекундах
+    # Замер задержки туннеля
     local ping_ms=$(echo "$time_sec" | awk '{print int($1 * 1000)}')
     LAST_PING="${ping_ms}"
+    log "  ├─ [DEBUG] Tunnel latency: ${ping_ms} ms"
 
-    # Проверка лимита реального пинга
     if [ "$ping_ms" -gt "$max_ping" ]; then
         LAST_REASON="Tunnel ping too high (${ping_ms} ms > ${max_ping} ms)"
         return 1
     fi
 
-    # 2. Проверяем Gemini через прокси на доступность в регионе
-    local gemini_blocked=$(curl -s -4 $proxy_arg -L --max-time 6 "https://gemini.google.com" 2>/dev/null | grep -ic "unsupported")
+    # 4. Проверяем Gemini
+    rm -f "$CURL_ERR_LOG"
+    local gemini_raw=$(curl -s -4 -x "socks5h://127.0.0.1:${proxy_port}" -L --max-time 6 "https://gemini.google.com" 2>"$CURL_ERR_LOG")
+    local gemini_blocked=$(echo "$gemini_raw" | grep -ic "unsupported")
+    local g_curl_err=$(cat "$CURL_ERR_LOG" | tr '\n' ' ' | sed 's/  */ /g')
+
+    log "  ├─ [DEBUG] Gemini check: blocked_matches=${gemini_blocked}"
+    if [ -n "$g_curl_err" ]; then
+        log "  ├─ [DEBUG-GEMINI-ERR] $g_curl_err"
+    fi
+
     if [ "$gemini_blocked" -gt 0 ]; then
         LAST_REASON="Gemini is region-blocked"
         return 1
@@ -81,6 +105,7 @@ fetch_and_cache_subscription() {
         return 1
     fi
 
+    log "[DEBUG] Downloading subscription from: $sub_url"
     curl -sL --max-time 10 "$sub_url" > "$TMP_LIST"
 
     if [ ! -s "$TMP_LIST" ]; then
@@ -99,12 +124,12 @@ fetch_and_cache_subscription() {
 }
 
 rotate_keys() {
+    local max_ping=$(uci -q get podkop_rotator.main.max_ping || echo 500)
+
     log ">>> Starting server rotation sequence..."
 
-    # 1. Попытка обновить подписку перед ротацией
     fetch_and_cache_subscription
 
-    # 2. Проверяем локальный кэш
     if [ ! -s "$CACHE_FILE" ]; then
         log "[ERROR] No cached keys available in $CACHE_FILE and network download failed!"
         send_tg "🔴 Podkop Rotator: Нет доступа к подписке и локальный кэш пуст!"
@@ -124,12 +149,27 @@ rotate_keys() {
         KEY_IP=$(echo "$KEY" | sed -n 's/.*@\([^:]*\):.*/\1/p')
         log "[$COUNTER/$TOTAL_KEYS] Testing candidate (IP: ${KEY_IP:-unknown})..."
 
+        # 1. ICMP-Пинг до сервера
+        if [ -n "$KEY_IP" ]; then
+            P_TIME=$(get_ping "$KEY_IP")
+            log "  ├─ [DEBUG] Direct ICMP Ping to $KEY_IP: ${P_TIME:-TIMEOUT} ms"
+            if [ -z "$P_TIME" ] || [ "$P_TIME" -gt "$max_ping" ]; then
+                log "  └─ [SKIP] Host ping failed or high (${P_TIME:-TIMEOUT} ms > ${max_ping} ms)"
+                continue
+            fi
+        fi
+
+        log "  ├─ [DEBUG] Applying proxy_string to UCI..."
         uci set podkop.main.proxy_string="$KEY"
+
+        log "  ├─ [DEBUG] Restarting /etc/init.d/podkop..."
         /etc/init.d/podkop restart >/dev/null 2>&1
         sleep 4
 
-        if ! sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
-            log "  └─ [FAIL] Sing-box rejected key syntax"
+        # Проверка синтаксиса Sing-box
+        local sb_check_out=$(sing-box check -c /etc/sing-box/config.json 2>&1)
+        if [ $? -ne 0 ]; then
+            log "  └─ [FAIL] Sing-box rejected key syntax: ${sb_check_out}"
             continue
         fi
 
@@ -142,7 +182,6 @@ rotate_keys() {
 
             send_tg "🟢 Podkop Rotator: Успешно переключено на сервер ${KEY_IP} (Пинг: ${LAST_PING}мс)"
 
-            # 3. Инет появился — сразу скачиваем свежайшую подписку на будущее
             log "Connection restored! Fetching latest subscription for offline cache..."
             fetch_and_cache_subscription
 
