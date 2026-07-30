@@ -5,6 +5,7 @@ CACHE_FILE="/etc/podkop_sub_cache.txt"
 TMP_LIST="/tmp/vpn_subscription.txt"
 FILTERED_LIST="/tmp/vpn_filtered.txt"
 LAST_REASON="Unknown"
+LAST_PING="N/A"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
@@ -23,15 +24,36 @@ send_tg() {
     fi
 }
 
+get_ping() {
+    local ip="$1"
+    local res=$(ping -c 2 -W 2 "$ip" 2>/dev/null | grep -oE "time=[0-9.]+" | head -n 1 | cut -d'=' -f2 | cut -d'.' -f1)
+    echo "$res"
+}
+
 check_connection() {
-    # 1. Проверяем YouTube (проверка прохождения трафика через туннель)
+    local max_ping=$(uci -q get podkop_rotator.main.max_ping || echo 500)
+
+    CURRENT_KEY=$(uci -q get podkop.main.proxy_string)
+    SERVER_IP=$(echo "$CURRENT_KEY" | sed -n 's/.*@\([^:]*\):.*/\1/p')
+
+    if [ -n "$SERVER_IP" ]; then
+        PING_TIME=$(get_ping "$SERVER_IP")
+        LAST_PING="${PING_TIME:-TIMEOUT}"
+
+        if [ -z "$PING_TIME" ] || [ "$PING_TIME" -gt "$max_ping" ]; then
+            LAST_REASON="Ping to $SERVER_IP is high/NA (${PING_TIME:-TIMEOUT} ms > ${max_ping} ms)"
+            return 1
+        fi
+    fi
+
+    # Проверка YouTube
     YT_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 6 "https://www.youtube.com/generate_204")
     if [ "$YT_CODE" != "204" ]; then
         LAST_REASON="YouTube check failed (HTTP: ${YT_CODE:-000})"
         return 1
     fi
 
-    # 2. Проверяем Gemini (проверка отсутствия блокировки по региону)
+    # Проверка Gemini
     GEMINI_BLOCKED=$(curl -s -L --max-time 6 "https://gemini.google.com" | grep -ic "unsupported")
     if [ "$GEMINI_BLOCKED" -gt 0 ]; then
         LAST_REASON="Gemini is region-blocked"
@@ -67,6 +89,8 @@ fetch_and_cache_subscription() {
 }
 
 rotate_keys() {
+    local max_ping=$(uci -q get podkop_rotator.main.max_ping || echo 500)
+
     log ">>> Starting server rotation sequence..."
 
     # 1. Попытка обновить подписку перед ротацией
@@ -92,6 +116,16 @@ rotate_keys() {
         KEY_IP=$(echo "$KEY" | sed -n 's/.*@\([^:]*\):.*/\1/p')
         log "[$COUNTER/$TOTAL_KEYS] Testing candidate (IP: ${KEY_IP:-unknown})..."
 
+        # Первичный фильтр по пингу до подстановки ключа
+        if [ -n "$KEY_IP" ]; then
+            P_TIME=$(get_ping "$KEY_IP")
+            if [ -z "$P_TIME" ] || [ "$P_TIME" -gt "$max_ping" ]; then
+                log "  └─ [SKIP] Host ping failed or high (${P_TIME:-TIMEOUT} ms > ${max_ping} ms)"
+                continue
+            fi
+            log "  ├─ Ping OK (${P_TIME} ms)"
+        fi
+
         uci set podkop.main.proxy_string="$KEY"
         /etc/init.d/podkop restart >/dev/null 2>&1
         sleep 5
@@ -105,10 +139,10 @@ rotate_keys() {
             uci commit podkop
             log "=================================================="
             log "[SUCCESS] WORKING KEY FOUND AND APPLIED!"
-            log "Server IP: $KEY_IP"
+            log "Server IP: $KEY_IP | Ping: ${LAST_PING} ms"
             log "=================================================="
 
-            send_tg "🟢 Podkop Rotator: Успешно переключено на сервер ${KEY_IP}"
+            send_tg "🟢 Podkop Rotator: Успешно переключено на сервер ${KEY_IP} (Пинг: ${LAST_PING}мс)"
 
             # 3. Инет появился — сразу скачиваем свежайшую подписку на будущее
             log "Connection restored! Fetching latest subscription for offline cache..."
@@ -189,7 +223,7 @@ while true; do
             send_tg "⚠️ Podkop Rotator: Зафиксирован отвал связи (${LAST_REASON}). Запускаю ротацию..."
             rotate_keys
         else
-            log "Check OK"
+            log "Check OK | Ping: ${LAST_PING} ms"
         fi
     else
         log "Rotator disabled via UCI config."
